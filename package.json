@@ -12,6 +12,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "ingest": "tsx src/scripts/ingest-cves.ts",
+    "build-prompts": "tsx src/scripts/build-security-prompts.ts",
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
     "test:watch": "vitest"
