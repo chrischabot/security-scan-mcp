@@ -8,8 +8,11 @@
  * 3. Build a database of security check prompts grouped by type
  *
  * Usage:
- *   ANTHROPIC_API_KEY=xxx npx tsx src/scripts/build-security-prompts.ts
+ *   npx tsx src/scripts/build-security-prompts.ts
+ *   (Set ANTHROPIC_API_KEY in .env or environment)
  */
+
+import 'dotenv/config';
 
 import { getDatabase, type SecurityPrompt, type SoftwareType } from '../db/database.js';
 import { callClaudeJSON, isConfigured } from '../llm/claude-client.js';

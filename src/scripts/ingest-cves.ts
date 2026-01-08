@@ -5,6 +5,8 @@
  * Fetches CVE data from NVD API and populates the database
  */
 
+import 'dotenv/config';
+
 import { createNVDClient } from '../nvd/client.js';
 import { getDatabase, SecurityDatabase, CVERecord } from '../db/database.js';
 import { CWE_TOP_25, CWE_HIERARCHY } from '../cwe/taxonomy.js';
