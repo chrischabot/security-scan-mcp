@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "cli": "tsx src/cli.ts",
     "ingest": "tsx src/scripts/ingest-cves.ts",
     "build-prompts": "tsx src/scripts/build-security-prompts.ts",
     "lint": "eslint src --ext .ts",
