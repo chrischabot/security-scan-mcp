@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server that provides **CVE-driven security promp
 
 ## What This Does
 
-The core feature: **Security review checklists derived from real CVEs**.
+**Security review checklists derived from real CVEs.**
 
 1. **Build phase**: Ingests thousands of CVEs from NVD, then uses Claude to categorize them into generic software types (web-server, database, mobile-app, etc.)
 2. **Runtime**: Coding agents query "what security issues should I look for in a web server?" and get actionable prompts based on actual vulnerabilities that have occurred in that type of software
@@ -58,7 +58,7 @@ Or add to `.claude.json`:
 
 ## MCP Tools
 
-### CVE-Driven Security Prompts
+### Security Prompts (Core Feature)
 
 #### `list_software_types`
 List all software types that have security prompts available.
@@ -126,21 +126,8 @@ Get CVEs related to a specific CWE.
 #### `get_top_cwes`
 Get the most dangerous CWEs for an application type.
 
-#### `suggest_remediation`
-Get language-specific remediation guidance for a vulnerability.
-
 #### `get_database_stats`
-Get statistics about the vulnerability database including CVE counts and security prompt counts.
-
-### Pattern Scanning Tools
-
-These tools perform static analysis on source files:
-
-#### `scan_file`
-Scan a single source file for security vulnerabilities.
-
-#### `scan_directory`
-Scan an entire codebase for vulnerabilities.
+Get statistics about the vulnerability database.
 
 ## How It Works
 

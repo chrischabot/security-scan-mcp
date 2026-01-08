@@ -1,6 +1,6 @@
 /**
  * SQLite Database Schema for CVE/CWE Storage
- * Uses FTS5 for full-text search on CVE descriptions
+ * Uses FTS5 for full-text search on CVE descriptions and security prompts
  */
 
 export const SCHEMA_SQL = `
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS cwes (
     name TEXT NOT NULL,
     description TEXT,
     abstraction TEXT CHECK(abstraction IN ('Pillar','Class','Base','Variant','Compound')),
-    parent_cwe_id INTEGER,  -- Self-reference without FK constraint for flexible insertion
+    parent_cwe_id INTEGER,
     status TEXT,
     likelihood_of_exploit TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -57,43 +57,6 @@ CREATE TABLE IF NOT EXISTS affected_products (
     version_end TEXT,
     version_end_type TEXT,
     cpe_uri TEXT
-);
-
--- Detection patterns organized by CWE
-CREATE TABLE IF NOT EXISTS detection_patterns (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern_id TEXT UNIQUE NOT NULL,
-    cwe_id INTEGER REFERENCES cwes(cwe_id),
-    name TEXT NOT NULL,
-    description TEXT,
-    severity TEXT CHECK(severity IN ('CRITICAL','HIGH','MEDIUM','LOW','INFO')),
-    languages TEXT NOT NULL,  -- JSON array of languages
-    pattern_type TEXT CHECK(pattern_type IN ('ast','taint','regex')),
-    pattern_config TEXT NOT NULL,  -- JSON configuration
-    remediation TEXT,
-    reference_urls TEXT,  -- JSON array of URLs
-    enabled INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-);
-
--- Scan results storage
-CREATE TABLE IF NOT EXISTS scan_findings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    scan_id TEXT NOT NULL,
-    file_path TEXT NOT NULL,
-    pattern_id TEXT REFERENCES detection_patterns(pattern_id),
-    cwe_id INTEGER,
-    severity TEXT,
-    line_start INTEGER,
-    line_end INTEGER,
-    column_start INTEGER,
-    column_end INTEGER,
-    matched_code TEXT,
-    message TEXT,
-    remediation TEXT,
-    confidence TEXT CHECK(confidence IN ('HIGH','MEDIUM','LOW')),
-    created_at TEXT DEFAULT (datetime('now'))
 );
 
 -- Software types (web-server, database, mobile-app, etc.)
@@ -170,11 +133,6 @@ CREATE INDEX IF NOT EXISTS idx_cves_modified ON cves(modified_date DESC);
 CREATE INDEX IF NOT EXISTS idx_cve_cwe_cwe ON cve_cwe_mappings(cwe_id);
 CREATE INDEX IF NOT EXISTS idx_affected_products_cve ON affected_products(cve_id);
 CREATE INDEX IF NOT EXISTS idx_affected_products_product ON affected_products(product);
-CREATE INDEX IF NOT EXISTS idx_patterns_cwe ON detection_patterns(cwe_id);
-CREATE INDEX IF NOT EXISTS idx_patterns_severity ON detection_patterns(severity);
-CREATE INDEX IF NOT EXISTS idx_findings_scan ON scan_findings(scan_id);
-CREATE INDEX IF NOT EXISTS idx_findings_file ON scan_findings(file_path);
-CREATE INDEX IF NOT EXISTS idx_findings_severity ON scan_findings(severity);
 CREATE INDEX IF NOT EXISTS idx_security_prompts_type ON security_prompts(type_id);
 CREATE INDEX IF NOT EXISTS idx_security_prompts_severity ON security_prompts(severity);
 `;

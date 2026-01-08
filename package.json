@@ -20,11 +20,9 @@
   "keywords": [
     "mcp",
     "security",
-    "vulnerability",
-    "scanner",
     "cve",
     "cwe",
-    "sast"
+    "prompts"
   ],
   "author": "",
   "license": "MIT",
@@ -32,14 +30,6 @@
     "@anthropic-ai/sdk": "^0.71.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^11.0.0",
-    "glob": "^10.3.0",
-    "tree-sitter": "^0.21.0",
-    "tree-sitter-go": "^0.21.0",
-    "tree-sitter-javascript": "^0.21.0",
-    "tree-sitter-python": "^0.21.0",
-    "tree-sitter-rust": "^0.21.0",
-    "tree-sitter-typescript": "^0.21.0",
-    "yaml": "^2.4.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
