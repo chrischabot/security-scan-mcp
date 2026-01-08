@@ -96,6 +96,50 @@ CREATE TABLE IF NOT EXISTS scan_findings (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Software types (web-server, database, mobile-app, etc.)
+CREATE TABLE IF NOT EXISTS software_types (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type_id TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    code_signals TEXT NOT NULL,  -- JSON array: how to identify this type in code
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Security check prompts by software type
+CREATE TABLE IF NOT EXISTS security_prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type_id TEXT NOT NULL REFERENCES software_types(type_id) ON DELETE CASCADE,
+    prompt_id TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    check_prompt TEXT NOT NULL,  -- The actual prompt for the LLM
+    why_it_matters TEXT,
+    severity TEXT CHECK(severity IN ('critical','high','medium','low')),
+    based_on_cves TEXT,  -- JSON array of CVE IDs this was derived from
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- FTS5 for searching security prompts
+CREATE VIRTUAL TABLE IF NOT EXISTS security_prompts_fts USING fts5(
+    prompt_id,
+    title,
+    check_prompt,
+    content='security_prompts',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+-- Triggers for security prompts FTS
+CREATE TRIGGER IF NOT EXISTS security_prompts_ai AFTER INSERT ON security_prompts BEGIN
+    INSERT INTO security_prompts_fts(rowid, prompt_id, title, check_prompt)
+    VALUES (NEW.id, NEW.prompt_id, NEW.title, NEW.check_prompt);
+END;
+
+CREATE TRIGGER IF NOT EXISTS security_prompts_ad AFTER DELETE ON security_prompts BEGIN
+    INSERT INTO security_prompts_fts(security_prompts_fts, rowid, prompt_id, title, check_prompt)
+    VALUES('delete', OLD.id, OLD.prompt_id, OLD.title, OLD.check_prompt);
+END;
+
 -- FTS5 full-text search index for CVE descriptions
 CREATE VIRTUAL TABLE IF NOT EXISTS cve_fts USING fts5(
     cve_id,
@@ -131,6 +175,8 @@ CREATE INDEX IF NOT EXISTS idx_patterns_severity ON detection_patterns(severity)
 CREATE INDEX IF NOT EXISTS idx_findings_scan ON scan_findings(scan_id);
 CREATE INDEX IF NOT EXISTS idx_findings_file ON scan_findings(file_path);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON scan_findings(severity);
+CREATE INDEX IF NOT EXISTS idx_security_prompts_type ON security_prompts(type_id);
+CREATE INDEX IF NOT EXISTS idx_security_prompts_severity ON security_prompts(severity);
 `;
 
 export const PRAGMA_SETTINGS = `

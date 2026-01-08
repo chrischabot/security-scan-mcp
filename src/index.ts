@@ -410,43 +410,146 @@ server.tool(
 );
 
 // =============================================================================
-// Tool: get_security_prompts
+// Tool: list_software_types
 // =============================================================================
 server.tool(
-    'get_security_prompts',
-    'Get LLM security analysis prompts for specified vulnerability categories. These prompts enable semantic code analysis beyond pattern matching.',
-    {
-        categories: z.array(z.enum(['injection', 'xss', 'authentication', 'access-control', 'cryptography', 'data-exposure', 'deserialization', 'ssrf-xxe']))
-            .optional()
-            .describe('Specific categories to get prompts for (omit for all)'),
-        cwe_ids: z.array(z.number())
-            .optional()
-            .describe('Specific CWE IDs to get prompts for'),
-        format: z.enum(['json', 'markdown'])
-            .optional()
-            .default('json')
-            .describe('Output format (json for structured, markdown for human-readable)')
-    },
-    async ({ categories, cwe_ids, format }) => {
-        const { getAllSecurityPrompts, getPromptsByCategory, generateSecurityPrompt, formatPromptForLLM } = await import('./llm/security-prompts.js');
+    'list_software_types',
+    'List all software types that have security prompts. Use this to see what types of applications have security checks available.',
+    {},
+    async () => {
+        const types = db.getAllSoftwareTypes();
+        const stats = db.getSecurityPromptsStats();
 
-        let prompts;
-        if (cwe_ids && cwe_ids.length > 0) {
-            prompts = cwe_ids
-                .map(id => generateSecurityPrompt(id))
-                .filter((p): p is NonNullable<typeof p> => p !== null);
-        } else if (categories && categories.length > 0) {
-            prompts = categories.flatMap(cat => getPromptsByCategory(cat));
-        } else {
-            prompts = getAllSecurityPrompts();
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    total_types: types.length,
+                    total_prompts: stats.totalPrompts,
+                    types: types.map(t => ({
+                        type_id: t.type_id,
+                        name: t.name,
+                        description: t.description,
+                        prompt_count: stats.promptsByType[t.type_id] || 0,
+                        code_signals: t.code_signals
+                    }))
+                }, null, 2)
+            }]
+        };
+    }
+);
+
+// =============================================================================
+// Tool: identify_software_type
+// =============================================================================
+server.tool(
+    'identify_software_type',
+    'Given code or a description, identify what software type it is. Returns matching types with their code signals.',
+    {
+        code_sample: z.string().optional().describe('A sample of code to analyze'),
+        description: z.string().optional().describe('Description of what the software does'),
+        file_patterns: z.array(z.string()).optional().describe('File patterns in the codebase (e.g., "routes/*.ts", "handlers/*.go")')
+    },
+    async ({ code_sample, description, file_patterns }) => {
+        const types = db.getAllSoftwareTypes();
+
+        // Score each type based on matches
+        const scores: Array<{ type: typeof types[0]; score: number; matches: string[] }> = [];
+
+        for (const type of types) {
+            let score = 0;
+            const matches: string[] = [];
+
+            for (const signal of type.code_signals) {
+                const signalLower = signal.toLowerCase();
+
+                if (code_sample && code_sample.toLowerCase().includes(signalLower)) {
+                    score += 2;
+                    matches.push(`Code contains: "${signal}"`);
+                }
+
+                if (description && description.toLowerCase().includes(signalLower)) {
+                    score += 1;
+                    matches.push(`Description mentions: "${signal}"`);
+                }
+
+                if (file_patterns) {
+                    for (const pattern of file_patterns) {
+                        if (pattern.toLowerCase().includes(signalLower)) {
+                            score += 1;
+                            matches.push(`File pattern matches: "${signal}"`);
+                        }
+                    }
+                }
+            }
+
+            if (score > 0) {
+                scores.push({ type, score, matches });
+            }
         }
 
-        if (format === 'markdown') {
-            const markdown = prompts.map(p => formatPromptForLLM(p)).join('\n\n---\n\n');
+        // Sort by score descending
+        scores.sort((a, b) => b.score - a.score);
+
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    identified_types: scores.slice(0, 5).map(s => ({
+                        type_id: s.type.type_id,
+                        name: s.type.name,
+                        confidence_score: s.score,
+                        matches: s.matches
+                    })),
+                    recommendation: scores.length > 0
+                        ? `Most likely type: ${scores[0].type.name} (${scores[0].type.type_id})`
+                        : 'No matching types found. Consider running build-security-prompts to populate the database.'
+                }, null, 2)
+            }]
+        };
+    }
+);
+
+// =============================================================================
+// Tool: get_security_prompts_for_type
+// =============================================================================
+server.tool(
+    'get_security_prompts_for_type',
+    'Get all security check prompts for a specific software type. These prompts are derived from real CVEs and tell you what to look for when reviewing code of this type.',
+    {
+        type_id: z.string().describe('The software type ID (e.g., "web-server", "database", "api-server")'),
+        severity: z.enum(['critical', 'high', 'medium', 'low']).optional().describe('Filter by severity'),
+        format: z.enum(['json', 'checklist']).optional().default('json').describe('Output format')
+    },
+    async ({ type_id, severity, format }) => {
+        const typeInfo = db.getSoftwareType(type_id);
+        if (!typeInfo) {
             return {
                 content: [{
                     type: 'text',
-                    text: markdown
+                    text: JSON.stringify({
+                        error: `Software type "${type_id}" not found`,
+                        available_types: db.getAllSoftwareTypes().map(t => t.type_id)
+                    })
+                }]
+            };
+        }
+
+        let prompts = db.getSecurityPromptsByType(type_id);
+
+        if (severity) {
+            prompts = prompts.filter(p => p.severity === severity);
+        }
+
+        if (format === 'checklist') {
+            const checklist = prompts.map((p, i) =>
+                `## ${i + 1}. ${p.title} [${p.severity.toUpperCase()}]\n\n${p.check_prompt}\n\n${p.why_it_matters ? `**Why:** ${p.why_it_matters}\n\n` : ''}${p.based_on_cves.length > 0 ? `*Based on: ${p.based_on_cves.slice(0, 3).join(', ')}${p.based_on_cves.length > 3 ? '...' : ''}*` : ''}`
+            ).join('\n\n---\n\n');
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: `# Security Review Checklist: ${typeInfo.name}\n\n${typeInfo.description}\n\n**Code Signals:** ${typeInfo.code_signals.join(', ')}\n\n---\n\n${checklist}`
                 }]
             };
         }
@@ -455,8 +558,19 @@ server.tool(
             content: [{
                 type: 'text',
                 text: JSON.stringify({
+                    type_id: typeInfo.type_id,
+                    type_name: typeInfo.name,
+                    description: typeInfo.description,
+                    code_signals: typeInfo.code_signals,
                     total_prompts: prompts.length,
-                    prompts
+                    prompts: prompts.map(p => ({
+                        id: p.prompt_id,
+                        title: p.title,
+                        severity: p.severity,
+                        check_prompt: p.check_prompt,
+                        why_it_matters: p.why_it_matters,
+                        based_on_cves: p.based_on_cves
+                    }))
                 }, null, 2)
             }]
         };
@@ -464,67 +578,31 @@ server.tool(
 );
 
 // =============================================================================
-// Tool: generate_code_review_prompt
+// Tool: search_security_prompts
 // =============================================================================
 server.tool(
-    'generate_code_review_prompt',
-    'Generate a comprehensive security review prompt for LLM-based code analysis. The prompt includes vulnerability descriptions, patterns to look for, and analysis questions.',
+    'search_security_prompts',
+    'Search security prompts across all types using full-text search',
     {
-        code: z.string().describe('The code to analyze'),
-        language: z.enum(['javascript', 'typescript', 'python', 'go', 'rust', 'java', 'php'])
-            .describe('Programming language of the code'),
-        categories: z.array(z.enum(['injection', 'xss', 'authentication', 'access-control', 'cryptography', 'data-exposure', 'deserialization', 'ssrf-xxe']))
-            .optional()
-            .describe('Specific vulnerability categories to check (omit for language-appropriate defaults)'),
-        focused_cwe: z.number()
-            .optional()
-            .describe('Single CWE ID to focus the analysis on')
+        query: z.string().describe('Search query (e.g., "SQL injection", "buffer overflow", "authentication")'),
+        limit: z.number().optional().default(20).describe('Maximum results to return')
     },
-    async ({ code, language, categories, focused_cwe }) => {
-        const { generateCodeReviewPrompt, generateFocusedPrompt } = await import('./llm/security-prompts.js');
-
-        let prompt: string;
-        if (focused_cwe) {
-            const focusedPrompt = generateFocusedPrompt(focused_cwe, code, language);
-            if (!focusedPrompt) {
-                return {
-                    content: [{
-                        type: 'text',
-                        text: JSON.stringify({ error: `CWE-${focused_cwe} not found` })
-                    }]
-                };
-            }
-            prompt = focusedPrompt;
-        } else {
-            prompt = generateCodeReviewPrompt(code, language, categories);
-        }
-
-        return {
-            content: [{
-                type: 'text',
-                text: prompt
-            }]
-        };
-    }
-);
-
-// =============================================================================
-// Tool: get_vulnerability_categories
-// =============================================================================
-server.tool(
-    'get_vulnerability_categories',
-    'Get available vulnerability categories for LLM-based security analysis',
-    {},
-    async () => {
-        const { getCategories } = await import('./llm/security-prompts.js');
-        const categories = getCategories();
+    async ({ query, limit }) => {
+        const prompts = db.searchSecurityPrompts(query, limit);
 
         return {
             content: [{
                 type: 'text',
                 text: JSON.stringify({
-                    total_categories: categories.length,
-                    categories
+                    query,
+                    total_results: prompts.length,
+                    results: prompts.map(p => ({
+                        id: p.prompt_id,
+                        type_id: p.type_id,
+                        title: p.title,
+                        severity: p.severity,
+                        check_prompt: p.check_prompt
+                    }))
                 }, null, 2)
             }]
         };
@@ -540,6 +618,7 @@ server.tool(
     {},
     async () => {
         const stats = db.getStats();
+        const promptStats = db.getSecurityPromptsStats();
 
         return {
             content: [{
@@ -549,6 +628,11 @@ server.tool(
                     total_cwes: stats.totalCWEs,
                     total_patterns: stats.totalPatterns,
                     cves_by_severity: stats.cvesBySeverity,
+                    security_prompts: {
+                        total_types: promptStats.totalTypes,
+                        total_prompts: promptStats.totalPrompts,
+                        prompts_by_type: promptStats.promptsByType
+                    },
                     database_path: db.getDbPath()
                 }, null, 2)
             }]

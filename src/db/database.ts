@@ -71,6 +71,23 @@ export interface ScanFinding {
     confidence: 'HIGH' | 'MEDIUM' | 'LOW';
 }
 
+export interface SoftwareType {
+    type_id: string;
+    name: string;
+    description: string | null;
+    code_signals: string[];  // How to identify this type in code
+}
+
+export interface SecurityPrompt {
+    prompt_id: string;
+    type_id: string;
+    title: string;
+    check_prompt: string;
+    why_it_matters: string | null;
+    severity: 'critical' | 'high' | 'medium' | 'low';
+    based_on_cves: string[];
+}
+
 export class SecurityDatabase {
     private db: Database.Database;
     private dbPath: string;
@@ -364,6 +381,123 @@ export class SecurityDatabase {
             totalPatterns: patternCount,
             cvesBySeverity
         };
+    }
+
+    // Software Type Operations
+    insertSoftwareType(type: SoftwareType): void {
+        const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO software_types (type_id, name, description, code_signals)
+            VALUES (?, ?, ?, ?)
+        `);
+        stmt.run(type.type_id, type.name, type.description, JSON.stringify(type.code_signals));
+    }
+
+    getSoftwareType(typeId: string): SoftwareType | undefined {
+        const stmt = this.db.prepare('SELECT * FROM software_types WHERE type_id = ?');
+        const row = stmt.get(typeId) as Record<string, unknown> | undefined;
+        if (!row) return undefined;
+        return {
+            type_id: row.type_id as string,
+            name: row.name as string,
+            description: row.description as string | null,
+            code_signals: JSON.parse(row.code_signals as string)
+        };
+    }
+
+    getAllSoftwareTypes(): SoftwareType[] {
+        const stmt = this.db.prepare('SELECT * FROM software_types ORDER BY name');
+        return (stmt.all() as Record<string, unknown>[]).map(row => ({
+            type_id: row.type_id as string,
+            name: row.name as string,
+            description: row.description as string | null,
+            code_signals: JSON.parse(row.code_signals as string)
+        }));
+    }
+
+    // Security Prompt Operations
+    insertSecurityPrompt(prompt: SecurityPrompt): void {
+        const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO security_prompts
+            (prompt_id, type_id, title, check_prompt, why_it_matters, severity, based_on_cves)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(
+            prompt.prompt_id, prompt.type_id, prompt.title, prompt.check_prompt,
+            prompt.why_it_matters, prompt.severity, JSON.stringify(prompt.based_on_cves)
+        );
+    }
+
+    insertSecurityPromptsBatch(prompts: SecurityPrompt[]): void {
+        const insert = this.db.prepare(`
+            INSERT OR REPLACE INTO security_prompts
+            (prompt_id, type_id, title, check_prompt, why_it_matters, severity, based_on_cves)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const insertMany = this.db.transaction((prompts: SecurityPrompt[]) => {
+            for (const p of prompts) {
+                insert.run(
+                    p.prompt_id, p.type_id, p.title, p.check_prompt,
+                    p.why_it_matters, p.severity, JSON.stringify(p.based_on_cves)
+                );
+            }
+        });
+
+        insertMany(prompts);
+    }
+
+    getSecurityPromptsByType(typeId: string): SecurityPrompt[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM security_prompts WHERE type_id = ? ORDER BY severity, title
+        `);
+        return (stmt.all(typeId) as Record<string, unknown>[]).map(row => ({
+            prompt_id: row.prompt_id as string,
+            type_id: row.type_id as string,
+            title: row.title as string,
+            check_prompt: row.check_prompt as string,
+            why_it_matters: row.why_it_matters as string | null,
+            severity: row.severity as SecurityPrompt['severity'],
+            based_on_cves: JSON.parse(row.based_on_cves as string || '[]')
+        }));
+    }
+
+    searchSecurityPrompts(query: string, limit = 50): SecurityPrompt[] {
+        const stmt = this.db.prepare(`
+            SELECT sp.* FROM security_prompts_fts f
+            JOIN security_prompts sp ON f.prompt_id = sp.prompt_id
+            WHERE security_prompts_fts MATCH ?
+            LIMIT ?
+        `);
+        return (stmt.all(query, limit) as Record<string, unknown>[]).map(row => ({
+            prompt_id: row.prompt_id as string,
+            type_id: row.type_id as string,
+            title: row.title as string,
+            check_prompt: row.check_prompt as string,
+            why_it_matters: row.why_it_matters as string | null,
+            severity: row.severity as SecurityPrompt['severity'],
+            based_on_cves: JSON.parse(row.based_on_cves as string || '[]')
+        }));
+    }
+
+    getSecurityPromptsStats(): { totalTypes: number; totalPrompts: number; promptsByType: Record<string, number> } {
+        const typeCount = (this.db.prepare('SELECT COUNT(*) as count FROM software_types').get() as { count: number }).count;
+        const promptCount = (this.db.prepare('SELECT COUNT(*) as count FROM security_prompts').get() as { count: number }).count;
+
+        const byType = this.db.prepare(`
+            SELECT type_id, COUNT(*) as count FROM security_prompts GROUP BY type_id
+        `).all() as { type_id: string; count: number }[];
+
+        const promptsByType: Record<string, number> = {};
+        for (const t of byType) {
+            promptsByType[t.type_id] = t.count;
+        }
+
+        return { totalTypes: typeCount, totalPrompts: promptCount, promptsByType };
+    }
+
+    clearSecurityPrompts(): void {
+        this.db.exec('DELETE FROM security_prompts');
+        this.db.exec('DELETE FROM software_types');
     }
 
     // Maintenance
