@@ -410,6 +410,128 @@ server.tool(
 );
 
 // =============================================================================
+// Tool: get_security_prompts
+// =============================================================================
+server.tool(
+    'get_security_prompts',
+    'Get LLM security analysis prompts for specified vulnerability categories. These prompts enable semantic code analysis beyond pattern matching.',
+    {
+        categories: z.array(z.enum(['injection', 'xss', 'authentication', 'access-control', 'cryptography', 'data-exposure', 'deserialization', 'ssrf-xxe']))
+            .optional()
+            .describe('Specific categories to get prompts for (omit for all)'),
+        cwe_ids: z.array(z.number())
+            .optional()
+            .describe('Specific CWE IDs to get prompts for'),
+        format: z.enum(['json', 'markdown'])
+            .optional()
+            .default('json')
+            .describe('Output format (json for structured, markdown for human-readable)')
+    },
+    async ({ categories, cwe_ids, format }) => {
+        const { getAllSecurityPrompts, getPromptsByCategory, generateSecurityPrompt, formatPromptForLLM } = await import('./llm/security-prompts.js');
+
+        let prompts;
+        if (cwe_ids && cwe_ids.length > 0) {
+            prompts = cwe_ids
+                .map(id => generateSecurityPrompt(id))
+                .filter((p): p is NonNullable<typeof p> => p !== null);
+        } else if (categories && categories.length > 0) {
+            prompts = categories.flatMap(cat => getPromptsByCategory(cat));
+        } else {
+            prompts = getAllSecurityPrompts();
+        }
+
+        if (format === 'markdown') {
+            const markdown = prompts.map(p => formatPromptForLLM(p)).join('\n\n---\n\n');
+            return {
+                content: [{
+                    type: 'text',
+                    text: markdown
+                }]
+            };
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    total_prompts: prompts.length,
+                    prompts
+                }, null, 2)
+            }]
+        };
+    }
+);
+
+// =============================================================================
+// Tool: generate_code_review_prompt
+// =============================================================================
+server.tool(
+    'generate_code_review_prompt',
+    'Generate a comprehensive security review prompt for LLM-based code analysis. The prompt includes vulnerability descriptions, patterns to look for, and analysis questions.',
+    {
+        code: z.string().describe('The code to analyze'),
+        language: z.enum(['javascript', 'typescript', 'python', 'go', 'rust', 'java', 'php'])
+            .describe('Programming language of the code'),
+        categories: z.array(z.enum(['injection', 'xss', 'authentication', 'access-control', 'cryptography', 'data-exposure', 'deserialization', 'ssrf-xxe']))
+            .optional()
+            .describe('Specific vulnerability categories to check (omit for language-appropriate defaults)'),
+        focused_cwe: z.number()
+            .optional()
+            .describe('Single CWE ID to focus the analysis on')
+    },
+    async ({ code, language, categories, focused_cwe }) => {
+        const { generateCodeReviewPrompt, generateFocusedPrompt } = await import('./llm/security-prompts.js');
+
+        let prompt: string;
+        if (focused_cwe) {
+            const focusedPrompt = generateFocusedPrompt(focused_cwe, code, language);
+            if (!focusedPrompt) {
+                return {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify({ error: `CWE-${focused_cwe} not found` })
+                    }]
+                };
+            }
+            prompt = focusedPrompt;
+        } else {
+            prompt = generateCodeReviewPrompt(code, language, categories);
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: prompt
+            }]
+        };
+    }
+);
+
+// =============================================================================
+// Tool: get_vulnerability_categories
+// =============================================================================
+server.tool(
+    'get_vulnerability_categories',
+    'Get available vulnerability categories for LLM-based security analysis',
+    {},
+    async () => {
+        const { getCategories } = await import('./llm/security-prompts.js');
+        const categories = getCategories();
+
+        return {
+            content: [{
+                type: 'text',
+                text: JSON.stringify({
+                    total_categories: categories.length,
+                    categories
+                }, null, 2)
+            }]
+        };
+    }
+);
+
+// =============================================================================
 // Tool: get_database_stats
 // =============================================================================
 server.tool(
