@@ -10,11 +10,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import path from 'path';
 import fs from 'fs';
 
 import { getDatabase, closeDatabase, SecurityDatabase } from './db/database.js';
-import { createCodeAnalyzer, CodeAnalyzer, ScanResult, Finding, formatScanReport } from './analyzer/code-analyzer.js';
+import { createCodeAnalyzer, CodeAnalyzer, ScanResult, Finding } from './analyzer/code-analyzer.js';
 import { getCWE, getCWEsForAppType, getCWEsSortedByDanger, AppType, CWEEntry } from './cwe/taxonomy.js';
 import { SupportedLanguage } from './parser/tree-sitter-parser.js';
 import { Severity } from './patterns/pattern-library.js';
@@ -53,9 +52,17 @@ server.tool(
         enable_taint_analysis: z.boolean()
             .optional()
             .default(true)
-            .describe('Enable taint analysis for injection vulnerabilities')
+            .describe('Enable taint analysis for injection vulnerabilities'),
+        enable_entropy_detection: z.boolean()
+            .optional()
+            .default(false)
+            .describe('Enable high-entropy string detection for secrets'),
+        include_secrets_patterns: z.boolean()
+            .optional()
+            .default(true)
+            .describe('Include enhanced API key and secrets patterns')
     },
-    async ({ file_path, severity_threshold, include_cve_context, enable_taint_analysis }) => {
+    async ({ file_path, severity_threshold, include_cve_context, enable_taint_analysis, enable_entropy_detection, include_secrets_patterns }) => {
         try {
             if (!fs.existsSync(file_path)) {
                 return {
@@ -69,7 +76,9 @@ server.tool(
             const findings = await analyzer.scanFile(file_path, {
                 severityThreshold: severity_threshold as Severity,
                 includeCVEContext: include_cve_context,
-                enableTaintAnalysis: enable_taint_analysis
+                enableTaintAnalysis: enable_taint_analysis,
+                enableEntropyDetection: enable_entropy_detection,
+                includeSecretsPatterns: include_secrets_patterns
             });
 
             const result = {
@@ -121,9 +130,29 @@ server.tool(
             .describe('Include related CVEs (slower)'),
         exclude_patterns: z.array(z.string())
             .optional()
-            .describe('Glob patterns to exclude')
+            .describe('Glob patterns to exclude'),
+        skip_test_files: z.boolean()
+            .optional()
+            .default(false)
+            .describe('Skip test files (reduces false positives)'),
+        skip_example_files: z.boolean()
+            .optional()
+            .default(false)
+            .describe('Skip example/sample files'),
+        enable_entropy_detection: z.boolean()
+            .optional()
+            .default(false)
+            .describe('Enable high-entropy string detection for secrets'),
+        include_secrets_patterns: z.boolean()
+            .optional()
+            .default(true)
+            .describe('Include enhanced API key and secrets patterns'),
+        output_format: z.enum(['json', 'sarif'])
+            .optional()
+            .default('json')
+            .describe('Output format (json or sarif for GitHub/IDE integration)')
     },
-    async ({ directory_path, severity_threshold, languages, cwe_ids, include_cve_context, exclude_patterns }) => {
+    async ({ directory_path, severity_threshold, languages, cwe_ids, include_cve_context, exclude_patterns, skip_test_files, skip_example_files, enable_entropy_detection, include_secrets_patterns, output_format }) => {
         try {
             if (!fs.existsSync(directory_path)) {
                 return {
@@ -139,8 +168,23 @@ server.tool(
                 languages: languages as SupportedLanguage[],
                 cweIds: cwe_ids,
                 includeCVEContext: include_cve_context,
-                excludePatterns: exclude_patterns
+                excludePatterns: exclude_patterns,
+                skipTestFiles: skip_test_files,
+                skipExampleFiles: skip_example_files,
+                enableEntropyDetection: enable_entropy_detection,
+                includeSecretsPatterns: include_secrets_patterns
             });
+
+            // Output in requested format
+            if (output_format === 'sarif') {
+                const { toSarifString } = await import('./output/sarif.js');
+                return {
+                    content: [{
+                        type: 'text',
+                        text: toSarifString(result, directory_path)
+                    }]
+                };
+            }
 
             return {
                 content: [{
@@ -334,7 +378,7 @@ server.tool(
             .describe('Programming language for code examples'),
         context: z.string().optional().describe('Optional context about the specific vulnerability instance')
     },
-    async ({ cwe_id, language, context }) => {
+    async ({ cwe_id, language, context: _context }) => {
         const cwe = getCWE(cwe_id);
 
         if (!cwe) {

@@ -13,7 +13,6 @@ import {
     detectLanguage,
     hasSyntaxErrors,
     getSyntaxErrors,
-    getNodeLocation,
     NodeLocation
 } from '../parser/tree-sitter-parser.js';
 import {
@@ -22,6 +21,7 @@ import {
     Severity,
     Confidence
 } from '../patterns/pattern-library.js';
+import { getAllSecretsPatterns, findHighEntropyStrings } from '../patterns/secrets-patterns.js';
 import { TaintAnalyzer, TaintFinding, createTaintAnalyzer } from './taint-analyzer.js';
 import { getDatabase, SecurityDatabase, CVERecord } from '../db/database.js';
 import { getCWE, CWEEntry } from '../cwe/taxonomy.js';
@@ -41,6 +41,46 @@ export interface ScanOptions {
     excludePatterns?: string[];
     /** Enable taint analysis (slower but more accurate) */
     enableTaintAnalysis?: boolean;
+    /** Skip test files (reduces false positives) */
+    skipTestFiles?: boolean;
+    /** Skip example files */
+    skipExampleFiles?: boolean;
+    /** Enable high-entropy string detection for secrets */
+    enableEntropyDetection?: boolean;
+    /** Include enhanced API key patterns */
+    includeSecretsPatterns?: boolean;
+}
+
+/**
+ * Check if a file path is a test file
+ */
+function isTestFile(filePath: string): boolean {
+    const testPatterns = [
+        /[/\\]tests?[/\\]/i,
+        /[/\\]__tests__[/\\]/i,
+        /[/\\]spec[/\\]/i,
+        /\.test\.[jt]sx?$/i,
+        /\.spec\.[jt]sx?$/i,
+        /_test\.(go|py|rs)$/i,
+        /test_.*\.py$/i,
+        /[/\\]test_.*\.py$/i
+    ];
+    return testPatterns.some(p => p.test(filePath));
+}
+
+/**
+ * Check if a file path is an example file
+ */
+function isExampleFile(filePath: string): boolean {
+    const examplePatterns = [
+        /[/\\]examples?[/\\]/i,
+        /[/\\]samples?[/\\]/i,
+        /[/\\]demos?[/\\]/i,
+        /[/\\]fixtures?[/\\]/i,
+        /\.example\./i,
+        /\.sample\./i
+    ];
+    return examplePatterns.some(p => p.test(filePath));
 }
 
 export interface Finding {
@@ -111,6 +151,16 @@ export class CodeAnalyzer {
     ): Promise<Finding[]> {
         const findings: Finding[] = [];
 
+        // Context filtering: skip test files if requested
+        if (options.skipTestFiles && isTestFile(filePath)) {
+            return findings;
+        }
+
+        // Context filtering: skip example files if requested
+        if (options.skipExampleFiles && isExampleFile(filePath)) {
+            return findings;
+        }
+
         // Detect language
         const language = detectLanguage(filePath);
         if (!language) {
@@ -141,6 +191,16 @@ export class CodeAnalyzer {
 
         // Get applicable patterns
         let patterns = getPatternsByLanguage(language);
+
+        // Add enhanced secrets patterns if enabled
+        if (options.includeSecretsPatterns !== false) {
+            const secretsPatterns = getAllSecretsPatterns();
+            // Filter secrets patterns to applicable languages
+            const applicableSecrets = secretsPatterns.filter(p =>
+                p.languages.includes(language) || p.languages.includes('*' as SupportedLanguage)
+            );
+            patterns = [...patterns, ...applicableSecrets];
+        }
 
         // Filter by severity threshold
         if (options.severityThreshold) {
@@ -182,11 +242,9 @@ export class CodeAnalyzer {
             if (pattern.patternType === 'regex' && pattern.regexPattern) {
                 const regex = new RegExp(pattern.regexPattern, 'gmi');
                 let match;
-                const lines = content.split('\n');
 
                 while ((match = regex.exec(content)) !== null) {
                     const lineNumber = content.substring(0, match.index).split('\n').length;
-                    const line = lines[lineNumber - 1] || '';
                     const column = match.index - content.lastIndexOf('\n', match.index - 1);
 
                     const location: NodeLocation = {
@@ -229,6 +287,46 @@ export class CodeAnalyzer {
                         );
                         findings.push(finding);
                     }
+                }
+            }
+        }
+
+        // Run high-entropy string detection for secrets
+        if (options.enableEntropyDetection) {
+            const entropyFindings = findHighEntropyStrings(content);
+            for (const ef of entropyFindings) {
+                const location: NodeLocation = {
+                    startLine: ef.line,
+                    startColumn: 1,
+                    endLine: ef.line,
+                    endColumn: ef.value.length + 1,
+                    startIndex: 0,
+                    endIndex: ef.value.length
+                };
+
+                const finding: Finding = {
+                    id: `entropy_${ef.line}_${ef.entropy.toFixed(2)}`,
+                    patternId: 'entropy-secret-detection',
+                    patternName: 'High-Entropy String Detection',
+                    description: 'Detected a high-entropy string that may be a secret or API key',
+                    filePath: path.relative(process.cwd(), filePath),
+                    location,
+                    severity: 'MEDIUM',
+                    confidence: ef.entropy > 4.5 ? 'HIGH' : 'MEDIUM',
+                    cweId: 798,
+                    cweName: 'Use of Hard-coded Credentials',
+                    matchedCode: this.truncateCode(ef.value, 100),
+                    message: `High-entropy string detected (entropy: ${ef.entropy.toFixed(2)}). This may be a hardcoded secret.`,
+                    remediation: 'Move secrets to environment variables or a secure secrets manager.',
+                    references: ['https://cwe.mitre.org/data/definitions/798.html']
+                };
+
+                // Avoid duplicates - don't add if we already found this via pattern matching
+                const isDuplicate = findings.some(f =>
+                    f.location.startLine === ef.line && f.cweId === 798
+                );
+                if (!isDuplicate) {
+                    findings.push(finding);
                 }
             }
         }

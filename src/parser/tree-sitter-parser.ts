@@ -89,7 +89,8 @@ async function getParser(language: SupportedLanguage): Promise<Parser> {
 
     const parser = new Parser();
     const langModule = await loadLanguage(language);
-    parser.setLanguage(langModule as Parser.Language);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    parser.setLanguage(langModule as any);
     parserCache.set(language, parser);
     return parser;
 }
@@ -168,7 +169,8 @@ export async function getQuery(
     }
 
     const langModule = await loadLanguage(language);
-    const query = new Query(langModule as Parser.Language, querySource);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const query = new Query(langModule as any, querySource);
     queryCache.set(cacheKey, query);
     return query;
 }
