@@ -168,6 +168,22 @@ security_prompts (
 | `NVD_API_KEY` | API key for NVD CVE access | Optional (rate limited without) |
 | `SECURITY_SCAN_DATA_DIR` | Database location | Default: `~/.security-scan-mcp` |
 
+## CLI Testing
+
+Test the MCP functions directly from the command line:
+
+```bash
+npm run cli help                    # Show all commands
+npm run cli list-types              # List software types
+npm run cli get-prompts web-server  # Get prompts for a type
+npm run cli get-prompts web-server --severity critical --checklist
+npm run cli search-prompts "SQL injection"
+npm run cli search-cves "apache"
+npm run cli cwe 79                  # Get CWE info
+npm run cli top-cwes web            # Top CWEs for app type
+npm run cli stats                   # Database statistics
+```
+
 ## Development
 
 ```bash
@@ -175,6 +191,7 @@ npm run build         # Build TypeScript
 npm run dev           # Run in development mode
 npm run ingest        # Ingest CVEs from NVD
 npm run build-prompts # Build security prompts (requires ANTHROPIC_API_KEY)
+npm run cli           # Test MCP functions via CLI
 npm test              # Run tests
 ```
 
