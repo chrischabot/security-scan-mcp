@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * Security Vulnerability Analyzer MCP Server
+ * Security Scan MCP Server
  *
- * An MCP server that provides security vulnerability scanning capabilities
- * using NVD CVE data, CWE taxonomy, and AST-based pattern matching.
+ * An MCP server that provides CVE-driven security prompts for code review.
+ * The core feature is security checklists derived from real CVEs, categorized
+ * by generic software type (web-server, database, mobile-app, etc.).
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';

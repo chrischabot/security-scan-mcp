@@ -1,30 +1,18 @@
 # Security Scan MCP Server
 
-An MCP (Model Context Protocol) server that provides security vulnerability analysis for codebases. It combines:
+An MCP (Model Context Protocol) server that provides **CVE-driven security prompts** for code review.
 
-1. **Pattern-based scanning**: AST analysis with Tree-sitter for known vulnerability patterns
-2. **CVE-driven security prompts**: LLM-generated security checks derived from real CVEs, organized by software type
+## What This Does
 
-## Key Features
+The core feature: **Security review checklists derived from real CVEs**.
 
-### CVE-Driven Security Prompts
-
-The unique feature of this MCP is its ability to provide **security review checklists derived from real CVEs**:
-
-1. **Build phase**: Analyzes thousands of CVEs using Claude to categorize them into generic software types (web-server, database, mobile-app, etc.)
-2. **Runtime**: Agents can query "what security issues should I look for in a web server?" and get prompts based on actual vulnerabilities that have occurred
+1. **Build phase**: Ingests thousands of CVEs from NVD, then uses Claude to categorize them into generic software types (web-server, database, mobile-app, etc.)
+2. **Runtime**: Coding agents query "what security issues should I look for in a web server?" and get actionable prompts based on actual vulnerabilities that have occurred in that type of software
 
 This means security guidance is:
-- **Data-driven**: Based on real CVEs, not just theoretical vulnerabilities
+- **Data-driven**: Based on real CVEs, not theoretical vulnerabilities
 - **Type-specific**: Different checks for web servers vs databases vs mobile apps
-- **Actionable**: Prompts written for code review, not product-specific
-
-### Pattern Scanning
-
-- **Multi-language**: JavaScript, TypeScript, Python, Go, Rust
-- **AST-based**: Uses Tree-sitter for accurate pattern matching
-- **Taint analysis**: Tracks untrusted data flow from sources to sinks
-- **CVE correlation**: Links findings to real-world vulnerabilities
+- **Actionable**: Written for code review, not product-specific
 
 ## Installation
 
@@ -35,19 +23,13 @@ npm run build
 
 ## Setup
 
-### 1. Seed the CWE database
+### Build the security prompts database
 
 ```bash
-npm run ingest seed
-```
-
-### 2. Build security prompts from CVEs (requires Claude API)
-
-```bash
-# First, ingest CVEs from NVD
+# 1. Ingest CVEs from NVD (can use NVD_API_KEY for faster rate)
 npm run ingest
 
-# Then, build security prompts using Claude
+# 2. Build security prompts using Claude
 ANTHROPIC_API_KEY=your-key npm run build-prompts
 ```
 
@@ -76,7 +58,7 @@ Or add to `.claude.json`:
 
 ## MCP Tools
 
-### Security Prompts (CVE-Driven)
+### CVE-Driven Security Prompts
 
 #### `list_software_types`
 List all software types that have security prompts available.
@@ -84,11 +66,6 @@ List all software types that have security prompts available.
 Returns types like `web-server`, `database`, `api-server`, `mobile-app`, etc., along with:
 - `code_signals`: How to identify this type in code (e.g., "HTTP handling", "SQL queries")
 - `prompt_count`: Number of security checks available for this type
-
-**Agent workflow:**
-1. Call `list_software_types` to see available types and their code signals
-2. Match your codebase to the appropriate type(s)
-3. Call `get_security_prompts_for_type` for relevant types
 
 #### `get_security_prompts_for_type`
 Get all security check prompts for a specific software type.
@@ -115,36 +92,36 @@ Full-text search across all security prompts.
 - `query` (string, required): e.g., "SQL injection", "buffer overflow"
 - `limit` (number, optional): Maximum results
 
-### Pattern Scanning
+### Agent Workflow
 
-#### `scan_file`
-Scan a single source file for security vulnerabilities.
+```
+1. Agent starts working on a codebase
 
-**Parameters:**
-- `file_path` (string, required): Absolute path to the file
-- `severity_threshold` (string, optional): CRITICAL, HIGH, MEDIUM, LOW, INFO
-- `include_cve_context` (boolean, optional): Include related CVEs
-- `enable_taint_analysis` (boolean, optional): Enable taint tracking
+2. Agent calls list_software_types
+   → Sees types: web-server, database, api-server...
+   → Sees code_signals for each type
 
-#### `scan_directory`
-Scan an entire codebase for vulnerabilities.
+3. Agent recognizes: "This code has Express routes, HTTP handling"
+   → Matches "web-server" type
 
-**Parameters:**
-- `directory_path` (string, required): Path to the directory
-- `severity_threshold` (string, optional): Minimum severity level
-- `languages` (array, optional): Filter by languages
-- `output_format` (string, optional): "json" or "sarif"
+4. Agent calls get_security_prompts_for_type("web-server")
+   → Gets 20+ security checks derived from real CVEs
+   → "Verify header sizes are validated..."
+   → "Check for request smuggling vulnerabilities..."
 
-### CVE/CWE Lookup
+5. Agent reviews code against each prompt
+```
+
+### CVE/CWE Database Tools
+
+#### `search_cves`
+Search the CVE database using full-text search.
 
 #### `get_cwe_info`
 Get detailed information about a specific CWE.
 
 #### `get_cves_by_cwe`
 Get CVEs related to a specific CWE.
-
-#### `search_cves`
-Search the CVE database using full-text search.
 
 #### `get_top_cwes`
 Get the most dangerous CWEs for an application type.
@@ -155,31 +132,27 @@ Get language-specific remediation guidance for a vulnerability.
 #### `get_database_stats`
 Get statistics about the vulnerability database including CVE counts and security prompt counts.
 
-## Architecture
+### Pattern Scanning Tools
 
-```
-src/
-├── index.ts                    # MCP server entry point
-├── db/
-│   ├── schema.ts               # SQLite schema (CVEs, CWEs, security_prompts)
-│   └── database.ts             # Database operations
-├── llm/
-│   └── claude-client.ts        # Claude API client for CVE analysis
-├── scripts/
-│   ├── ingest-cves.ts          # CVE ingestion from NVD
-│   └── build-security-prompts.ts  # Build prompts from CVEs
-├── analyzer/
-│   ├── code-analyzer.ts        # Pattern-based scanner
-│   └── taint-analyzer.ts       # Taint analysis
-├── parser/
-│   └── tree-sitter-parser.ts   # AST parsing
-└── patterns/
-    └── pattern-library.ts      # Detection patterns
-```
+These tools perform static analysis on source files:
 
-## Database Schema
+#### `scan_file`
+Scan a single source file for security vulnerabilities.
 
-### Security Prompts Tables
+#### `scan_directory`
+Scan an entire codebase for vulnerabilities.
+
+## How It Works
+
+### Building Security Prompts
+
+1. **CVE Ingestion**: Fetches CVEs from NVD API
+2. **Analysis**: Sends CVEs to Claude in batches
+3. **Categorization**: Claude identifies generic software type (web-server, database, etc.)
+4. **Prompt Generation**: Claude extracts the vulnerability pattern and creates actionable check prompts
+5. **Storage**: Saves to SQLite with full-text search
+
+### Database Schema
 
 ```sql
 -- Software types (web-server, database, etc.)
@@ -211,51 +184,11 @@ security_prompts (
 ## Development
 
 ```bash
-# Build
-npm run build
-
-# Run in development mode
-npm run dev
-
-# Ingest CVEs
-npm run ingest
-
-# Build security prompts (requires ANTHROPIC_API_KEY)
-npm run build-prompts
-
-# Run tests
-npm test
-```
-
-## How It Works
-
-### Building Security Prompts
-
-1. **CVE Ingestion**: Fetches CVEs from NVD API
-2. **Analysis**: Sends CVEs to Claude in batches
-3. **Categorization**: Claude identifies software type (web-server, database, etc.)
-4. **Pattern Extraction**: Claude extracts the security issue pattern
-5. **Prompt Generation**: Creates actionable check prompts for code review
-6. **Storage**: Saves to SQLite with full-text search
-
-### Agent Usage Flow
-
-```
-1. Agent starts working on a codebase
-
-2. Agent calls list_software_types
-   → Sees types: web-server, database, api-server...
-   → Sees code_signals for each type
-
-3. Agent recognizes: "This code has Express routes, HTTP handling"
-   → Matches "web-server" type
-
-4. Agent calls get_security_prompts_for_type("web-server")
-   → Gets 20+ security checks derived from real CVEs
-   → "Verify header sizes are validated..."
-   → "Check for request smuggling vulnerabilities..."
-
-5. Agent reviews code against each prompt
+npm run build         # Build TypeScript
+npm run dev           # Run in development mode
+npm run ingest        # Ingest CVEs from NVD
+npm run build-prompts # Build security prompts (requires ANTHROPIC_API_KEY)
+npm test              # Run tests
 ```
 
 ## License

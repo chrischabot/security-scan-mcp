@@ -1,7 +1,7 @@
 {
   "name": "security-scan-mcp",
   "version": "1.0.0",
-  "description": "MCP server for security vulnerability analysis with NVD CVE integration",
+  "description": "MCP server providing CVE-driven security prompts for code review",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
