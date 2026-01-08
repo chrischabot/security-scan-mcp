@@ -1,15 +1,22 @@
 #!/usr/bin/env npx tsx
 /**
- * CVE Pattern Synthesis Script
+ * CVE Pattern Synthesis Script (Two-Phase LLM Process)
  *
- * BUILD-TIME script that:
- * 1. Reads ALL CVEs from the database
- * 2. Extracts product/vendor names dynamically (no hardcoded categories)
- * 3. Clusters CVEs by product type that EMERGE from the data
- * 4. Generates prompts for an LLM to synthesize security checks
- * 5. Stores results for runtime use
+ * This script uses LLMs in TWO phases:
  *
- * The categories are NOT predefined - they come from what's actually in the CVE data.
+ * PHASE 1: CATEGORIZATION
+ * - Read all CVEs, extract product names (Apache, nginx, WordPress, etc.)
+ * - Generate prompts for LLM to categorize products into generic types
+ *   "What type of software is Apache?" → "web server"
+ * - Merge products into higher-level categories (web servers, databases, etc.)
+ *
+ * PHASE 2: SYNTHESIS
+ * - For each category (not product!), gather ALL related CVEs
+ * - Generate prompts for LLM to synthesize security checks
+ * - Output: "When reviewing web server code, check for X, Y, Z..."
+ *
+ * The key insight: We don't want "Apache" prompts - we want "web server" prompts
+ * that apply to ANY web server code being reviewed.
  */
 
 import fs from 'fs';
@@ -26,14 +33,6 @@ interface CVEData {
     vendors: string[];   // Extracted from description
 }
 
-interface ProductCluster {
-    name: string;
-    normalizedName: string;
-    cveCount: number;
-    cves: CVEData[];
-    relatedProducts: string[];  // Products often mentioned together
-    commonPatterns: string[];   // Security issues that appear frequently
-}
 
 /**
  * Extract product and vendor names from CVE description
@@ -198,31 +197,48 @@ function isBoringPhrase(phrase: string): boolean {
 }
 
 /**
- * Main: Read all CVEs and cluster by product
+ * Main entry point - handles both phases
  */
 async function main() {
     const args = process.argv.slice(2);
+    const phase = args.find(a => a.startsWith('--phase='))?.split('=')[1] || '1';
     const dryRun = args.includes('--dry-run');
-    const minClusterSize = parseInt(args.find(a => a.startsWith('--min-size='))?.split('=')[1] || '10');
+    const minProductCVEs = parseInt(args.find(a => a.startsWith('--min-cves='))?.split('=')[1] || '5');
+    const categoriesFile = args.find(a => a.startsWith('--categories='))?.split('=')[1];
 
-    console.log('=== CVE Pattern Synthesis ===\n');
-    console.log('Reading CVEs and extracting product clusters dynamically...\n');
+    if (phase === '1') {
+        await runPhase1(dryRun, minProductCVEs);
+    } else if (phase === '2') {
+        if (!categoriesFile) {
+            console.error('Phase 2 requires --categories=<file> with LLM-generated categorizations');
+            process.exit(1);
+        }
+        await runPhase2(categoriesFile, dryRun);
+    } else {
+        console.error('Unknown phase. Use --phase=1 or --phase=2');
+        process.exit(1);
+    }
+}
+
+/**
+ * PHASE 1: Extract products and generate categorization prompts
+ *
+ * Output: Prompts for LLM to categorize each product into a generic type
+ */
+async function runPhase1(dryRun: boolean, minProductCVEs: number) {
+    console.log('=== PHASE 1: Product Extraction & Categorization Prompts ===\n');
 
     const db = getDatabase();
-
-    // Get ALL CVEs from the database - no hardcoded CWE list
-    // First get all unique CWEs that have CVEs
     const stats = db.getStats();
     console.log(`Database contains ${stats.totalCVEs} CVEs across ${stats.totalCWEs} CWEs\n`);
 
     const allCVEs: CVEData[] = [];
     const seenCVEs = new Set<string>();
-    const productCounts = new Map<string, number>();
+    const productToCVEs = new Map<string, CVEData[]>();
 
     console.log('Step 1: Extracting CVEs and identifying products...');
 
-    // Search for all CVEs using a broad query, or iterate through all CWEs in DB
-    // We'll use searchCVEs with common terms to get everything
+    // Get all CVEs
     const searchTerms = ['vulnerability', 'allows', 'attack', 'remote', 'execute', 'injection', 'overflow'];
 
     for (const term of searchTerms) {
@@ -239,240 +255,428 @@ async function main() {
                 description: cve.description,
                 severity: cve.cvss_v3_severity || 'UNKNOWN',
                 score: cve.cvss_v3_score,
-                cweId: null,  // CWE association is in separate table
+                cweId: null,
                 products,
                 vendors
             };
 
             allCVEs.push(cveData);
 
-            // Count product occurrences
+            // Group CVEs by product
             for (const product of products) {
                 const normalized = normalizeProductName(product);
-                productCounts.set(normalized, (productCounts.get(normalized) || 0) + 1);
+                if (!productToCVEs.has(normalized)) {
+                    productToCVEs.set(normalized, []);
+                }
+                productToCVEs.get(normalized)!.push(cveData);
             }
         }
     }
 
     console.log(`  Found ${allCVEs.length} unique CVEs`);
-    console.log(`  Identified ${productCounts.size} unique products\n`);
+    console.log(`  Identified ${productToCVEs.size} unique products\n`);
 
-    // Step 2: Build clusters for products with enough CVEs
-    console.log(`Step 2: Building clusters (min size: ${minClusterSize})...`);
+    // Filter to products with enough CVEs
+    const significantProducts = Array.from(productToCVEs.entries())
+        .filter(([_, cves]) => cves.length >= minProductCVEs)
+        .sort((a, b) => b[1].length - a[1].length);
 
-    const clusters = new Map<string, ProductCluster>();
+    console.log(`  ${significantProducts.length} products have ${minProductCVEs}+ CVEs\n`);
 
-    // Find products with enough CVEs to form a cluster
-    const significantProducts = Array.from(productCounts.entries())
-        .filter(([_, count]) => count >= minClusterSize)
-        .sort((a, b) => b[1] - a[1]);
+    // Generate categorization prompt for LLM
+    console.log('Step 2: Generating categorization prompt for LLM...\n');
 
-    console.log(`  Found ${significantProducts.length} products with ${minClusterSize}+ CVEs\n`);
+    const categorizationPrompt = generateCategorizationPrompt(significantProducts);
 
-    for (const [normalizedName, _] of significantProducts) {
-        // Find all CVEs mentioning this product
-        const clusterCVEs = allCVEs.filter(cve =>
-            cve.products.some(p => normalizeProductName(p) === normalizedName)
-        );
+    // Save outputs
+    const outputDir = 'data';
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+    }
 
-        if (clusterCVEs.length >= minClusterSize) {
-            // Find the most common non-normalized name
-            const nameCounts = new Map<string, number>();
-            for (const cve of clusterCVEs) {
-                for (const p of cve.products) {
-                    if (normalizeProductName(p) === normalizedName) {
-                        nameCounts.set(p, (nameCounts.get(p) || 0) + 1);
-                    }
-                }
+    // Save product data for phase 2
+    const productData = {
+        generatedAt: new Date().toISOString(),
+        totalCVEs: allCVEs.length,
+        products: significantProducts.map(([name, cves]) => ({
+            normalizedName: name,
+            displayName: findDisplayName(name, cves),
+            cveCount: cves.length,
+            sampleDescriptions: cves.slice(0, 3).map(c => c.description.substring(0, 200))
+        }))
+    };
+
+    if (dryRun) {
+        console.log('[DRY RUN] Would save product data and categorization prompt\n');
+        console.log('=== CATEGORIZATION PROMPT FOR LLM ===\n');
+        console.log(categorizationPrompt.substring(0, 3000) + '...\n');
+    } else {
+        fs.writeFileSync(path.join(outputDir, 'phase1-products.json'), JSON.stringify(productData, null, 2));
+        fs.writeFileSync(path.join(outputDir, 'phase1-categorization-prompt.md'), categorizationPrompt);
+        console.log('Saved: data/phase1-products.json');
+        console.log('Saved: data/phase1-categorization-prompt.md');
+    }
+
+    console.log('\n=== NEXT STEPS ===');
+    console.log('1. Run the prompt in data/phase1-categorization-prompt.md through an LLM');
+    console.log('2. Save the LLM output (JSON) to data/phase1-categories.json');
+    console.log('3. Run: npx tsx src/scripts/synthesize-prompts.ts --phase=2 --categories=data/phase1-categories.json');
+}
+
+/**
+ * Find the most common display name for a normalized product name
+ */
+function findDisplayName(normalized: string, cves: CVEData[]): string {
+    const nameCounts = new Map<string, number>();
+    for (const cve of cves) {
+        for (const p of cve.products) {
+            if (normalizeProductName(p) === normalized) {
+                nameCounts.set(p, (nameCounts.get(p) || 0) + 1);
             }
-            const displayName = Array.from(nameCounts.entries())
-                .sort((a, b) => b[1] - a[1])[0]?.[0] || normalizedName;
+        }
+    }
+    return Array.from(nameCounts.entries())
+        .sort((a, b) => b[1] - a[1])[0]?.[0] || normalized;
+}
 
-            // Find related products (often mentioned together)
-            const relatedCounts = new Map<string, number>();
-            for (const cve of clusterCVEs) {
-                for (const p of cve.products) {
-                    const pNorm = normalizeProductName(p);
-                    if (pNorm !== normalizedName) {
-                        relatedCounts.set(p, (relatedCounts.get(p) || 0) + 1);
-                    }
-                }
-            }
-            const relatedProducts = Array.from(relatedCounts.entries())
-                .filter(([_, count]) => count >= 3)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 10)
-                .map(([name]) => name);
+/**
+ * Generate the LLM prompt for categorizing products into generic types
+ */
+function generateCategorizationPrompt(products: Array<[string, CVEData[]]>): string {
+    const productList = products.map(([name, cves]) => {
+        const displayName = findDisplayName(name, cves);
+        const samples = cves.slice(0, 2).map(c =>
+            `  - "${c.description.substring(0, 150)}..."`
+        ).join('\n');
+        return `### ${displayName} (${cves.length} CVEs)\n${samples}`;
+    }).join('\n\n');
 
-            // Extract common security patterns
-            const commonPatterns = extractSecurityPatterns(clusterCVEs.map(c => c.description));
+    return `# Product Categorization Task
 
-            clusters.set(normalizedName, {
-                name: displayName,
-                normalizedName,
-                cveCount: clusterCVEs.length,
-                cves: clusterCVEs,
-                relatedProducts,
-                commonPatterns
-            });
+You are categorizing software products mentioned in CVE vulnerability reports into GENERIC categories that would be useful for code review.
+
+## Important Guidelines
+
+1. **Think about code review**: The goal is to create categories like "web servers" or "database clients" that a code reviewer could identify, NOT specific product names like "Apache" or "MySQL"
+
+2. **Be generic**: "Apache" → "web server", "MySQL" → "database", "OpenSSL" → "cryptographic library"
+
+3. **Consider what code does**: A reviewer looking at code can identify "this is a web server" or "this handles file uploads" but cannot identify "this is Apache specifically"
+
+4. **Merge similar things**: nginx, Apache, IIS → all "web server"
+
+5. **Create useful categories** that cover ALL types of software, including:
+
+   **Server/Backend:**
+   - Web servers (HTTP request handling)
+   - Database systems (SQL, data storage)
+   - API servers (REST, GraphQL endpoints)
+   - Authentication services (login, sessions, OAuth)
+   - Network services (DNS, mail, FTP, SSH)
+   - Message queues (pub/sub, async processing)
+
+   **Desktop Applications:**
+   - Image/graphics editors (Photoshop-like, rendering)
+   - Document processors (PDF, Office documents)
+   - Media players (video, audio playback)
+   - IDEs/dev tools (code editors, debuggers)
+   - Archive utilities (compression, extraction)
+
+   **Mobile/Client:**
+   - Mobile apps (iOS, Android native)
+   - Browser extensions
+   - Desktop clients (Electron, native)
+
+   **Financial/Business:**
+   - Banking/payment systems (transactions, accounts)
+   - E-commerce platforms (checkout, inventory)
+   - ERP systems (enterprise resource planning)
+   - Trading platforms (financial data, orders)
+
+   **Specialized:**
+   - IoT/embedded devices (firmware, sensors)
+   - Industrial control (SCADA, PLCs)
+   - Medical software (health data, devices)
+   - Gaming engines (rendering, networking)
+   - Cryptographic libraries (encryption, signing)
+
+   **Data Processing:**
+   - File parsers (XML, JSON, binary formats)
+   - Media processing (image, video, audio codecs)
+   - Data serialization (protocol buffers, encoding)
+   - ETL pipelines (data transformation)
+
+   - etc. (discover more from the data!)
+
+## Products to Categorize
+
+${productList}
+
+## Expected Output Format
+
+Return a JSON object mapping each product to its generic category:
+
+\`\`\`json
+{
+  "categories": {
+    "web-server": {
+      "name": "Web Servers",
+      "description": "Software that handles HTTP requests and serves web content",
+      "products": ["apache", "nginx", "iis", "tomcat"],
+      "codeSignals": ["HTTP handling", "request parsing", "header processing", "URL routing"]
+    },
+    "database": {
+      "name": "Database Systems",
+      "description": "Data storage and query systems",
+      "products": ["mysql", "postgresql", "mongodb"],
+      "codeSignals": ["SQL queries", "data persistence", "connection pooling", "query parsing"]
+    }
+  }
+}
+\`\`\`
+
+The "codeSignals" field should list things a code reviewer could look for to identify this type of software.
+
+Now categorize ALL the products listed above:`;
+}
+
+/**
+ * PHASE 2: Generate security prompts per CATEGORY (not per product)
+ */
+async function runPhase2(categoriesFile: string, dryRun: boolean) {
+    console.log('=== PHASE 2: Category-Based Security Prompt Synthesis ===\n');
+
+    // Load categorizations from LLM output
+    if (!fs.existsSync(categoriesFile)) {
+        console.error(`Categories file not found: ${categoriesFile}`);
+        process.exit(1);
+    }
+
+    const categorizations = JSON.parse(fs.readFileSync(categoriesFile, 'utf-8'));
+
+    // Load product data from phase 1
+    const productDataFile = 'data/phase1-products.json';
+    if (!fs.existsSync(productDataFile)) {
+        console.error('Phase 1 data not found. Run phase 1 first.');
+        process.exit(1);
+    }
+
+    // Load for validation (actual CVE retrieval happens below from DB)
+    JSON.parse(fs.readFileSync(productDataFile, 'utf-8'));
+
+    // Re-load CVEs and group by CATEGORY
+    console.log('Step 1: Grouping CVEs by category...\n');
+
+    const db = getDatabase();
+    const categoryToCVEs = new Map<string, CVEData[]>();
+
+    // Build product → category mapping
+    const productToCategory = new Map<string, string>();
+    for (const [categoryId, categoryInfo] of Object.entries(categorizations.categories || {})) {
+        const info = categoryInfo as { products?: string[] };
+        for (const product of info.products || []) {
+            productToCategory.set(normalizeProductName(product), categoryId);
         }
     }
 
-    // Step 3: Print summary and generate synthesis prompts
-    console.log('Step 3: Generated clusters:\n');
+    // Fetch CVEs and assign to categories
+    const seenCVEs = new Set<string>();
+    const searchTerms = ['vulnerability', 'allows', 'attack', 'remote', 'execute', 'injection', 'overflow'];
 
-    const sortedClusters = Array.from(clusters.values())
-        .sort((a, b) => b.cveCount - a.cveCount);
+    for (const term of searchTerms) {
+        const cves = db.searchCVEs(term, 5000);
 
-    for (const cluster of sortedClusters.slice(0, 30)) {
-        console.log(`  ${cluster.name}: ${cluster.cveCount} CVEs`);
-        if (cluster.commonPatterns.length > 0) {
-            console.log(`    Patterns: ${cluster.commonPatterns.slice(0, 3).join(', ')}`);
-        }
-        if (cluster.relatedProducts.length > 0) {
-            console.log(`    Related: ${cluster.relatedProducts.slice(0, 3).join(', ')}`);
+        for (const cve of cves) {
+            if (seenCVEs.has(cve.cve_id)) continue;
+            seenCVEs.add(cve.cve_id);
+
+            const { products } = extractProductsFromDescription(cve.description);
+
+            const cveData: CVEData = {
+                cveId: cve.cve_id,
+                description: cve.description,
+                severity: cve.cvss_v3_severity || 'UNKNOWN',
+                score: cve.cvss_v3_score,
+                cweId: null,
+                products,
+                vendors: []
+            };
+
+            // Assign to categories
+            for (const product of products) {
+                const normalized = normalizeProductName(product);
+                const category = productToCategory.get(normalized);
+                if (category) {
+                    if (!categoryToCVEs.has(category)) {
+                        categoryToCVEs.set(category, []);
+                    }
+                    categoryToCVEs.get(category)!.push(cveData);
+                }
+            }
         }
     }
 
-    // Step 4: Generate synthesis prompts
-    console.log('\n\nStep 4: Generating LLM synthesis prompts...\n');
+    console.log('Categories with CVEs:');
+    for (const [cat, cves] of categoryToCVEs.entries()) {
+        const info = (categorizations.categories as Record<string, { name?: string }>)[cat];
+        console.log(`  ${info?.name || cat}: ${cves.length} CVEs`);
+    }
+    console.log('');
+
+    // Generate synthesis prompts per category
+    console.log('Step 2: Generating security synthesis prompts...\n');
 
     const synthesisPrompts: Array<{
-        productName: string;
+        categoryId: string;
+        categoryName: string;
         cveCount: number;
         prompt: string;
     }> = [];
 
-    for (const cluster of sortedClusters) {
-        const prompt = generateSynthesisPrompt(cluster);
+    for (const [categoryId, cves] of categoryToCVEs.entries()) {
+        const categoryInfo = (categorizations.categories as Record<string, {
+            name?: string;
+            description?: string;
+            codeSignals?: string[];
+        }>)[categoryId];
+
+        if (!categoryInfo) continue;
+
+        const prompt = generateCategorySynthesisPrompt(
+            categoryId,
+            categoryInfo.name || categoryId,
+            categoryInfo.description || '',
+            categoryInfo.codeSignals || [],
+            cves
+        );
+
         synthesisPrompts.push({
-            productName: cluster.name,
-            cveCount: cluster.cveCount,
+            categoryId,
+            categoryName: categoryInfo.name || categoryId,
+            cveCount: cves.length,
             prompt
         });
     }
 
-    // Step 5: Save output
+    // Save outputs
     const outputDir = 'data';
-    const outputPath = path.join(outputDir, 'cve-clusters.json');
-
-    const outputData = {
-        generatedAt: new Date().toISOString(),
-        totalCVEs: allCVEs.length,
-        totalClusters: clusters.size,
-        clusters: sortedClusters.map(c => ({
-            name: c.name,
-            normalizedName: c.normalizedName,
-            cveCount: c.cveCount,
-            commonPatterns: c.commonPatterns,
-            relatedProducts: c.relatedProducts,
-            sampleCVEs: c.cves.slice(0, 5).map(cve => ({
-                id: cve.cveId,
-                severity: cve.severity,
-                description: cve.description.substring(0, 200) + '...'
-            }))
-        })),
-        synthesisPrompts
-    };
+    const promptsDir = path.join(outputDir, 'phase2-synthesis-prompts');
 
     if (dryRun) {
-        console.log('[DRY RUN] Would save to:', outputPath);
-        console.log('\nSample synthesis prompt:');
-        console.log('---');
+        console.log('[DRY RUN] Would save synthesis prompts\n');
         if (synthesisPrompts[0]) {
-            console.log(synthesisPrompts[0].prompt.substring(0, 1500) + '...');
+            console.log('=== SAMPLE SYNTHESIS PROMPT ===\n');
+            console.log(synthesisPrompts[0].prompt.substring(0, 2000) + '...\n');
         }
     } else {
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
-        }
-
-        fs.writeFileSync(outputPath, JSON.stringify(outputData, null, 2));
-        console.log(`Saved clusters to: ${outputPath}`);
-
-        // Save individual prompts
-        const promptsDir = path.join(outputDir, 'synthesis-prompts');
         if (!fs.existsSync(promptsDir)) {
             fs.mkdirSync(promptsDir, { recursive: true });
         }
 
         for (const sp of synthesisPrompts) {
-            const safeFilename = sp.productName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-            const promptFile = path.join(promptsDir, `${safeFilename}.md`);
-            fs.writeFileSync(promptFile, sp.prompt);
+            const filename = `${sp.categoryId}.md`;
+            fs.writeFileSync(path.join(promptsDir, filename), sp.prompt);
         }
-        console.log(`Saved ${synthesisPrompts.length} prompts to: ${promptsDir}/`);
+
+        // Save summary
+        const summary = {
+            generatedAt: new Date().toISOString(),
+            categories: synthesisPrompts.map(sp => ({
+                id: sp.categoryId,
+                name: sp.categoryName,
+                cveCount: sp.cveCount
+            }))
+        };
+        fs.writeFileSync(path.join(outputDir, 'phase2-summary.json'), JSON.stringify(summary, null, 2));
+
+        console.log(`Saved ${synthesisPrompts.length} synthesis prompts to: ${promptsDir}/`);
     }
 
-    console.log('\n=== Next Steps ===');
-    console.log('1. Review the clusters in data/cve-clusters.json');
-    console.log('2. Run each prompt in data/synthesis-prompts/ through an LLM');
-    console.log('3. The LLM will synthesize security checks from the CVE patterns');
-    console.log('4. Save the LLM outputs to data/security-checks/');
+    console.log('\n=== NEXT STEPS ===');
+    console.log('1. Run each prompt in data/phase2-synthesis-prompts/ through an LLM');
+    console.log('2. The LLM will generate security checks for each category');
+    console.log('3. Save outputs to data/security-checks/<category>.json');
+    console.log('4. The MCP server will load these at runtime');
 }
 
 /**
- * Generate the LLM prompt for synthesizing security checks from a cluster
+ * Generate synthesis prompt for a CATEGORY (not a product)
  */
-function generateSynthesisPrompt(cluster: ProductCluster): string {
-    const sampleCVEs = cluster.cves
-        .slice(0, 40)
-        .map(cve => `[${cve.cveId}] (${cve.severity}${cve.score ? `, ${cve.score}` : ''}): ${cve.description}`)
+function generateCategorySynthesisPrompt(
+    categoryId: string,
+    categoryName: string,
+    description: string,
+    codeSignals: string[],
+    cves: CVEData[]
+): string {
+    // Deduplicate CVEs and take a good sample
+    const uniqueCVEs = Array.from(new Map(cves.map(c => [c.cveId, c])).values());
+    const sampleCVEs = uniqueCVEs
+        .sort((a, b) => (b.score || 0) - (a.score || 0))  // Prioritize higher severity
+        .slice(0, 50);
+
+    const cveList = sampleCVEs
+        .map(cve => `[${cve.cveId}] (${cve.severity}): ${cve.description}`)
         .join('\n\n');
 
-    return `# Security Check Synthesis: ${cluster.name}
+    const patterns = extractSecurityPatterns(uniqueCVEs.map(c => c.description));
 
-You are a security expert analyzing ${cluster.cveCount} real CVEs affecting **${cluster.name}** to create actionable security review prompts.
+    return `# Security Check Synthesis: ${categoryName}
 
-## Overview
-- **Product**: ${cluster.name}
-- **Total CVEs analyzed**: ${cluster.cveCount}
-- **Common vulnerability patterns**: ${cluster.commonPatterns.join(', ') || 'Various'}
-- **Related products**: ${cluster.relatedProducts.join(', ') || 'None identified'}
+You are creating security review prompts for **${categoryName}** - ${description}
 
-## CVE Examples (${Math.min(40, cluster.cves.length)} of ${cluster.cveCount})
+## How to Identify This Type of Code
 
-${sampleCVEs}
+A code reviewer can identify ${categoryName.toLowerCase()} code by looking for:
+${codeSignals.map(s => `- ${s}`).join('\n')}
+
+## Common Vulnerability Patterns Found (${uniqueCVEs.length} CVEs analyzed)
+
+${patterns.join(', ')}
+
+## Real CVE Examples (${sampleCVEs.length} shown)
+
+${cveList}
 
 ---
 
 ## Your Task
 
-Analyze these real-world vulnerabilities and synthesize security check prompts.
+Create security check prompts that apply to ANY ${categoryName.toLowerCase()} code, not just specific products.
 
-For EACH distinct vulnerability pattern you observe across multiple CVEs, create a security check:
+For each vulnerability pattern you observe across multiple CVEs, create a check:
 
-1. **Title**: Short descriptive name
-2. **Check Prompt**: Natural language instruction for what to look for in code (2-3 sentences)
-3. **Why It Matters**: What can go wrong (reference specific CVEs as evidence)
+1. **Title**: Short name (e.g., "Request Header Size Validation")
+2. **Check Prompt**: What to look for - written so it applies to ANY ${categoryName.toLowerCase()}
+   - GOOD: "Verify that HTTP header sizes are validated before processing"
+   - BAD: "Check Apache's LimitRequestFieldSize setting"
+3. **Why It Matters**: What can go wrong (reference CVE IDs)
 4. **Severity**: critical/high/medium/low
-5. **Category**: Type of vulnerability (e.g., buffer-overflow, injection, auth-bypass)
+5. **Code Signals**: What patterns in code indicate this check is relevant
 
-Focus on patterns that appear in MULTIPLE CVEs - those are the checks worth creating.
-
-## Expected Output Format
+## Output Format
 
 \`\`\`json
 {
-  "productType": "${cluster.name}",
+  "category": "${categoryId}",
+  "categoryName": "${categoryName}",
   "securityChecks": [
     {
-      "id": "unique-id",
+      "id": "${categoryId}-001",
       "title": "Descriptive Title",
-      "checkPrompt": "When reviewing ${cluster.name} code, verify that... Look for... Ensure that...",
-      "whyItMatters": "Based on CVE-XXXX and CVE-YYYY, failing to do this leads to...",
+      "checkPrompt": "When reviewing ${categoryName.toLowerCase()} code, verify that... Look for... Ensure that...",
+      "whyItMatters": "CVE-XXXX and CVE-YYYY show that failing to do this leads to...",
       "severity": "high",
-      "category": "buffer-overflow",
-      "basedOnCVEs": ["CVE-XXXX", "CVE-YYYY", "CVE-ZZZZ"]
+      "codeSignals": ["function names", "patterns", "imports that indicate this check applies"]
     }
   ],
   "generalPrinciples": [
-    "Cross-cutting security principle derived from these CVEs"
+    "Universal principle for ${categoryName.toLowerCase()} security"
   ]
 }
 \`\`\`
 
-Generate as many checks as the CVE data supports - don't force patterns that aren't there, but don't miss patterns that appear multiple times.`;
+Generate checks that would help someone reviewing ANY ${categoryName.toLowerCase()} code, regardless of which specific product or framework they're using.`;
 }
 
 main().catch(console.error);
