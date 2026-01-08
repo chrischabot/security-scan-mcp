@@ -17,11 +17,27 @@
  *
  * The key insight: We don't want "Apache" prompts - we want "web server" prompts
  * that apply to ANY web server code being reviewed.
+ *
+ * Usage:
+ *   # Manual mode - generates prompts for you to run through LLM
+ *   npx tsx src/scripts/synthesize-prompts.ts --phase=1
+ *   npx tsx src/scripts/synthesize-prompts.ts --phase=2 --categories=data/phase1-categories.json
+ *
+ *   # Auto mode - uses Claude API directly (requires ANTHROPIC_API_KEY)
+ *   npx tsx src/scripts/synthesize-prompts.ts --phase=1 --auto
+ *   npx tsx src/scripts/synthesize-prompts.ts --phase=2 --auto
  */
 
 import fs from 'fs';
 import path from 'path';
 import { getDatabase } from '../db/database.js';
+import {
+    getClaudeInfo,
+    categorizeProducts,
+    synthesizeSecurityChecks,
+    type CategorizationResponse,
+    type SynthesisResponse
+} from '../llm/claude-client.js';
 
 interface CVEData {
     cveId: string;
@@ -203,17 +219,29 @@ async function main() {
     const args = process.argv.slice(2);
     const phase = args.find(a => a.startsWith('--phase='))?.split('=')[1] || '1';
     const dryRun = args.includes('--dry-run');
+    const autoMode = args.includes('--auto');
     const minProductCVEs = parseInt(args.find(a => a.startsWith('--min-cves='))?.split('=')[1] || '5');
     const categoriesFile = args.find(a => a.startsWith('--categories='))?.split('=')[1];
 
-    if (phase === '1') {
-        await runPhase1(dryRun, minProductCVEs);
-    } else if (phase === '2') {
-        if (!categoriesFile) {
-            console.error('Phase 2 requires --categories=<file> with LLM-generated categorizations');
+    // Check Claude availability for auto mode
+    if (autoMode) {
+        const claudeInfo = getClaudeInfo();
+        if (!claudeInfo.available) {
+            console.error('ERROR: --auto mode requires ANTHROPIC_API_KEY environment variable');
+            console.error('Set it with: export ANTHROPIC_API_KEY=your-api-key');
             process.exit(1);
         }
-        await runPhase2(categoriesFile, dryRun);
+        console.log(`Claude API: ${claudeInfo.message}\n`);
+    }
+
+    if (phase === '1') {
+        await runPhase1(dryRun, minProductCVEs, autoMode);
+    } else if (phase === '2') {
+        if (!autoMode && !categoriesFile) {
+            console.error('Phase 2 requires either --auto or --categories=<file>');
+            process.exit(1);
+        }
+        await runPhase2(categoriesFile, dryRun, autoMode);
     } else {
         console.error('Unknown phase. Use --phase=1 or --phase=2');
         process.exit(1);
@@ -224,9 +252,13 @@ async function main() {
  * PHASE 1: Extract products and generate categorization prompts
  *
  * Output: Prompts for LLM to categorize each product into a generic type
+ * If autoMode is true, calls Claude API directly
  */
-async function runPhase1(dryRun: boolean, minProductCVEs: number) {
+async function runPhase1(dryRun: boolean, minProductCVEs: number, autoMode: boolean = false) {
     console.log('=== PHASE 1: Product Extraction & Categorization Prompts ===\n');
+    if (autoMode) {
+        console.log('[AUTO MODE] Will call Claude API to categorize products\n');
+    }
 
     const db = getDatabase();
     const stats = db.getStats();
@@ -310,17 +342,53 @@ async function runPhase1(dryRun: boolean, minProductCVEs: number) {
         console.log('[DRY RUN] Would save product data and categorization prompt\n');
         console.log('=== CATEGORIZATION PROMPT FOR LLM ===\n');
         console.log(categorizationPrompt.substring(0, 3000) + '...\n');
-    } else {
-        fs.writeFileSync(path.join(outputDir, 'phase1-products.json'), JSON.stringify(productData, null, 2));
-        fs.writeFileSync(path.join(outputDir, 'phase1-categorization-prompt.md'), categorizationPrompt);
-        console.log('Saved: data/phase1-products.json');
-        console.log('Saved: data/phase1-categorization-prompt.md');
+        return;
     }
 
-    console.log('\n=== NEXT STEPS ===');
-    console.log('1. Run the prompt in data/phase1-categorization-prompt.md through an LLM');
-    console.log('2. Save the LLM output (JSON) to data/phase1-categories.json');
-    console.log('3. Run: npx tsx src/scripts/synthesize-prompts.ts --phase=2 --categories=data/phase1-categories.json');
+    // Save product data and prompt
+    fs.writeFileSync(path.join(outputDir, 'phase1-products.json'), JSON.stringify(productData, null, 2));
+    fs.writeFileSync(path.join(outputDir, 'phase1-categorization-prompt.md'), categorizationPrompt);
+    console.log('Saved: data/phase1-products.json');
+    console.log('Saved: data/phase1-categorization-prompt.md');
+
+    // Auto mode: Call Claude API to categorize products
+    if (autoMode && significantProducts.length > 0) {
+        console.log('\nStep 3: Calling Claude API to categorize products...\n');
+
+        try {
+            const categorizations = await categorizeProducts(categorizationPrompt);
+
+            // Save categorizations
+            fs.writeFileSync(
+                path.join(outputDir, 'phase1-categories.json'),
+                JSON.stringify(categorizations, null, 2)
+            );
+            console.log('Saved: data/phase1-categories.json');
+
+            // Print summary
+            const categoryCount = Object.keys(categorizations.categories || {}).length;
+            console.log(`\nClaude categorized products into ${categoryCount} generic categories:`);
+            for (const [catId, catInfo] of Object.entries(categorizations.categories || {})) {
+                const info = catInfo as { name?: string; products?: string[] };
+                console.log(`  - ${info.name || catId}: ${info.products?.length || 0} products`);
+            }
+
+            console.log('\n=== NEXT STEP ===');
+            console.log('Run: npx tsx src/scripts/synthesize-prompts.ts --phase=2 --auto');
+            console.log('  OR: npx tsx src/scripts/synthesize-prompts.ts --phase=2 --categories=data/phase1-categories.json');
+        } catch (error) {
+            console.error('\nError calling Claude API:', error);
+            console.log('\nFalling back to manual mode.');
+            console.log('Run the prompt in data/phase1-categorization-prompt.md through an LLM manually.');
+            process.exit(1);
+        }
+    } else if (!autoMode) {
+        console.log('\n=== NEXT STEPS ===');
+        console.log('1. Run the prompt in data/phase1-categorization-prompt.md through an LLM');
+        console.log('2. Save the LLM output (JSON) to data/phase1-categories.json');
+        console.log('3. Run: npx tsx src/scripts/synthesize-prompts.ts --phase=2 --categories=data/phase1-categories.json');
+        console.log('\n   OR use --auto to call Claude API directly');
+    }
 }
 
 /**
@@ -442,17 +510,25 @@ Now categorize ALL the products listed above:`;
 
 /**
  * PHASE 2: Generate security prompts per CATEGORY (not per product)
+ * If autoMode is true, calls Claude API directly for each category
  */
-async function runPhase2(categoriesFile: string, dryRun: boolean) {
+async function runPhase2(categoriesFile: string | undefined, dryRun: boolean, autoMode: boolean = false) {
     console.log('=== PHASE 2: Category-Based Security Prompt Synthesis ===\n');
+    if (autoMode) {
+        console.log('[AUTO MODE] Will call Claude API to synthesize security checks\n');
+    }
 
-    // Load categorizations from LLM output
-    if (!fs.existsSync(categoriesFile)) {
-        console.error(`Categories file not found: ${categoriesFile}`);
+    // Load categorizations from Phase 1 output
+    const defaultCategoriesFile = 'data/phase1-categories.json';
+    const catFile = categoriesFile || defaultCategoriesFile;
+
+    if (!fs.existsSync(catFile)) {
+        console.error(`Categories file not found: ${catFile}`);
+        console.error('Run phase 1 first, or specify --categories=<file>');
         process.exit(1);
     }
 
-    const categorizations = JSON.parse(fs.readFileSync(categoriesFile, 'utf-8'));
+    const categorizations: CategorizationResponse = JSON.parse(fs.readFileSync(catFile, 'utf-8'));
 
     // Load product data from phase 1
     const productDataFile = 'data/phase1-products.json';
@@ -561,6 +637,7 @@ async function runPhase2(categoriesFile: string, dryRun: boolean) {
     // Save outputs
     const outputDir = 'data';
     const promptsDir = path.join(outputDir, 'phase2-synthesis-prompts');
+    const checksDir = path.join(outputDir, 'security-checks');
 
     if (dryRun) {
         console.log('[DRY RUN] Would save synthesis prompts\n');
@@ -568,17 +645,78 @@ async function runPhase2(categoriesFile: string, dryRun: boolean) {
             console.log('=== SAMPLE SYNTHESIS PROMPT ===\n');
             console.log(synthesisPrompts[0].prompt.substring(0, 2000) + '...\n');
         }
-    } else {
-        if (!fs.existsSync(promptsDir)) {
-            fs.mkdirSync(promptsDir, { recursive: true });
+        return;
+    }
+
+    // Save prompts
+    if (!fs.existsSync(promptsDir)) {
+        fs.mkdirSync(promptsDir, { recursive: true });
+    }
+
+    for (const sp of synthesisPrompts) {
+        const filename = `${sp.categoryId}.md`;
+        fs.writeFileSync(path.join(promptsDir, filename), sp.prompt);
+    }
+    console.log(`Saved ${synthesisPrompts.length} synthesis prompts to: ${promptsDir}/`);
+
+    // Auto mode: Call Claude API for each category
+    if (autoMode && synthesisPrompts.length > 0) {
+        console.log('\nStep 3: Calling Claude API to synthesize security checks...\n');
+
+        if (!fs.existsSync(checksDir)) {
+            fs.mkdirSync(checksDir, { recursive: true });
         }
+
+        const allSecurityChecks: SynthesisResponse[] = [];
+        let successCount = 0;
+        let errorCount = 0;
 
         for (const sp of synthesisPrompts) {
-            const filename = `${sp.categoryId}.md`;
-            fs.writeFileSync(path.join(promptsDir, filename), sp.prompt);
+            console.log(`  Processing: ${sp.categoryName} (${sp.cveCount} CVEs)...`);
+
+            try {
+                const result = await synthesizeSecurityChecks(sp.prompt);
+                allSecurityChecks.push(result);
+
+                // Save individual category result
+                fs.writeFileSync(
+                    path.join(checksDir, `${sp.categoryId}.json`),
+                    JSON.stringify(result, null, 2)
+                );
+
+                console.log(`    ✓ Generated ${result.securityChecks?.length || 0} security checks`);
+                successCount++;
+            } catch (error) {
+                console.error(`    ✗ Error: ${error}`);
+                errorCount++;
+            }
+
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
-        // Save summary
+        // Save combined output
+        const combinedOutput = {
+            generatedAt: new Date().toISOString(),
+            totalCategories: allSecurityChecks.length,
+            totalChecks: allSecurityChecks.reduce((sum, r) => sum + (r.securityChecks?.length || 0), 0),
+            categories: allSecurityChecks
+        };
+        fs.writeFileSync(
+            path.join(outputDir, 'all-security-checks.json'),
+            JSON.stringify(combinedOutput, null, 2)
+        );
+
+        console.log(`\n=== SYNTHESIS COMPLETE ===`);
+        console.log(`Successfully processed: ${successCount}/${synthesisPrompts.length} categories`);
+        if (errorCount > 0) {
+            console.log(`Errors: ${errorCount}`);
+        }
+        console.log(`Total security checks generated: ${combinedOutput.totalChecks}`);
+        console.log(`\nSaved to: ${checksDir}/`);
+        console.log(`Combined output: data/all-security-checks.json`);
+    } else if (!autoMode) {
+        // Save summary for manual mode
         const summary = {
             generatedAt: new Date().toISOString(),
             categories: synthesisPrompts.map(sp => ({
@@ -589,14 +727,13 @@ async function runPhase2(categoriesFile: string, dryRun: boolean) {
         };
         fs.writeFileSync(path.join(outputDir, 'phase2-summary.json'), JSON.stringify(summary, null, 2));
 
-        console.log(`Saved ${synthesisPrompts.length} synthesis prompts to: ${promptsDir}/`);
+        console.log('\n=== NEXT STEPS ===');
+        console.log('1. Run each prompt in data/phase2-synthesis-prompts/ through an LLM');
+        console.log('2. The LLM will generate security checks for each category');
+        console.log('3. Save outputs to data/security-checks/<category>.json');
+        console.log('4. The MCP server will load these at runtime');
+        console.log('\n   OR use --auto to call Claude API directly');
     }
-
-    console.log('\n=== NEXT STEPS ===');
-    console.log('1. Run each prompt in data/phase2-synthesis-prompts/ through an LLM');
-    console.log('2. The LLM will generate security checks for each category');
-    console.log('3. Save outputs to data/security-checks/<category>.json');
-    console.log('4. The MCP server will load these at runtime');
 }
 
 /**
