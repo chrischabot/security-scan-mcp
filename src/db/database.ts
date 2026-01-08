@@ -227,7 +227,7 @@ export class SecurityDatabase {
             INSERT OR REPLACE INTO detection_patterns (
                 pattern_id, cwe_id, name, description, severity,
                 languages, pattern_type, pattern_config,
-                remediation, references, enabled, updated_at
+                remediation, reference_urls, enabled, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         `);
         stmt.run(
@@ -276,7 +276,7 @@ export class SecurityDatabase {
             pattern_type: row.pattern_type as DetectionPattern['pattern_type'],
             pattern_config: JSON.parse(row.pattern_config as string),
             remediation: row.remediation as string | null,
-            references: JSON.parse(row.references as string || '[]'),
+            references: JSON.parse(row.reference_urls as string || '[]'),
             enabled: row.enabled === 1
         };
     }

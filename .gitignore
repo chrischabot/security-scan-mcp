@@ -4,11 +4,12 @@ node_modules/
 # Build output
 dist/
 
-# Database files
-*.db
+# Database files (except pre-seeded data)
 *.db-journal
 *.db-wal
 *.db-shm
+# Keep the seeded database
+!data/vulnerabilities.db
 
 # Environment files
 .env

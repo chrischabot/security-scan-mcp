@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS cwes (
     name TEXT NOT NULL,
     description TEXT,
     abstraction TEXT CHECK(abstraction IN ('Pillar','Class','Base','Variant','Compound')),
-    parent_cwe_id INTEGER REFERENCES cwes(cwe_id),
+    parent_cwe_id INTEGER,  -- Self-reference without FK constraint for flexible insertion
     status TEXT,
     likelihood_of_exploit TEXT,
     created_at TEXT DEFAULT (datetime('now'))
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS detection_patterns (
     pattern_type TEXT CHECK(pattern_type IN ('ast','taint','regex')),
     pattern_config TEXT NOT NULL,  -- JSON configuration
     remediation TEXT,
-    references TEXT,  -- JSON array of URLs
+    reference_urls TEXT,  -- JSON array of URLs
     enabled INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))

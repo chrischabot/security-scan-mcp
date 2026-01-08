@@ -180,7 +180,7 @@ export class CodeAnalyzer {
 
             // Run regex pattern matching
             if (pattern.patternType === 'regex' && pattern.regexPattern) {
-                const regex = new RegExp(pattern.regexPattern, 'gm');
+                const regex = new RegExp(pattern.regexPattern, 'gmi');
                 let match;
                 const lines = content.split('\n');
 

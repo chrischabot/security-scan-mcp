@@ -442,7 +442,7 @@ export const SECURITY_PATTERNS: SecurityPattern[] = [
         confidence: 'MEDIUM',
         languages: ['javascript', 'typescript', 'python', 'go', 'rust'],
         patternType: 'regex',
-        regexPattern: '(?i)(password|passwd|pwd|secret|api_key|apikey|auth_token|access_token)\\s*[=:]\\s*["\'][^"\']{8,}["\']',
+        regexPattern: '(password|passwd|pwd|secret|api_key|apikey|auth_token|access_token)\\s*[=:]\\s*["\'][^"\']{8,}["\']',
         message: 'Potential hardcoded credential detected',
         remediation: 'Use environment variables or a secrets manager for credentials',
         references: ['https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html'],

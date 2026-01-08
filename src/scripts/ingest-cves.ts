@@ -130,17 +130,49 @@ function seedCWEData(db: SecurityDatabase): void {
     const allCWEs = [...CWE_TOP_25, ...CWE_HIERARCHY];
     let inserted = 0;
 
-    for (const cwe of allCWEs) {
+    // Sort CWEs so that parents (those without parent_cwe_id or with lower abstraction level)
+    // are inserted first. Pillars first, then Classes, then Bases, then Variants.
+    const abstractionOrder: Record<string, number> = {
+        'Pillar': 0,
+        'Class': 1,
+        'Base': 2,
+        'Variant': 3,
+        'Compound': 4
+    };
+
+    const sortedCWEs = [...allCWEs].sort((a, b) => {
+        const aOrder = abstractionOrder[a.abstraction || 'Variant'] ?? 5;
+        const bOrder = abstractionOrder[b.abstraction || 'Variant'] ?? 5;
+        return aOrder - bOrder;
+    });
+
+    // First pass: insert all CWEs without parent references
+    for (const cwe of sortedCWEs) {
         db.insertCWE({
             cwe_id: cwe.cwe_id,
             name: cwe.name,
             description: cwe.description || null,
             abstraction: cwe.abstraction || null,
-            parent_cwe_id: cwe.parent_cwe_id || null,
+            parent_cwe_id: null,  // Insert without parent first
             status: cwe.status || null,
             likelihood_of_exploit: cwe.likelihood_of_exploit || null
         });
         inserted++;
+    }
+
+    // Second pass: update with parent references
+    for (const cwe of sortedCWEs) {
+        if (cwe.parent_cwe_id) {
+            db.insertCWE({
+                cwe_id: cwe.cwe_id,
+                name: cwe.name,
+                description: cwe.description || null,
+                abstraction: cwe.abstraction || null,
+                parent_cwe_id: cwe.parent_cwe_id,
+                status: cwe.status || null,
+                likelihood_of_exploit: cwe.likelihood_of_exploit || null
+            });
+        }
     }
 
     console.log(`  Inserted ${inserted} CWE entries`);
